@@ -3,4 +3,8 @@ __pycache__/
 .DS_Store
 out
 website/
+minisql_rl/data/generated/
+*.db
+*.db-shm
+*.db-wal
 docs-minimind/
