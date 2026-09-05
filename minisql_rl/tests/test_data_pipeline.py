@@ -31,7 +31,6 @@ class DataPipelineTestCase(unittest.TestCase):
             train_size=44,
             dev_size=12,
             test_size=12,
-            repair_ratio=1.0,
         )
         cls.manifest = build_training_data(cls.database_path, cls.output, cls.config)
 
@@ -48,9 +47,9 @@ class DataPipelineTestCase(unittest.TestCase):
             "canonical_train.jsonl",
             "canonical_dev.jsonl",
             "canonical_test.jsonl",
-            "sft_train.jsonl",
-            "sft_dev.jsonl",
-            "agent_rl_train.jsonl",
+            "sql_sft_train.jsonl",
+            "sql_sft_dev.jsonl",
+            "sql_rl_train.jsonl",
             "eval_dev_prompts.jsonl",
             "eval_test_prompts.jsonl",
             "manifest.json",
@@ -67,33 +66,33 @@ class DataPipelineTestCase(unittest.TestCase):
         self.assertFalse(families["train"] & families["test"])
         self.assertFalse(families["dev"] & families["test"])
 
-    def test_sft_records_follow_minimind_tool_format(self) -> None:
-        records = self._read_jsonl(self.output / "sft_train.jsonl")
+    def test_sft_records_target_direct_sql(self) -> None:
+        records = self._read_jsonl(self.output / "sql_sft_train.jsonl")
+        canonical = self._read_jsonl(self.output / "canonical_train.jsonl")
         self.assertEqual(len(records), self.config.train_size)
-        for record in records:
+        for record, source in zip(records, canonical):
             messages = record["conversations"]
-            self.assertEqual([message["role"] for message in messages], [
-                "system", "user", "assistant", "tool", "assistant", "tool", "assistant"
-            ])
-            tools = json.loads(messages[0]["tools"])
-            calls = json.loads(messages[2]["tool_calls"])
-            self.assertEqual(tools[0]["function"]["name"], "query_database")
-            self.assertEqual(calls[0]["name"], "query_database")
-            self.assertIn("error", json.loads(messages[3]["content"]))
+            self.assertEqual([message["role"] for message in messages], ["system", "user", "assistant"])
+            self.assertEqual(messages[-1]["content"], source["sql"])
+            self.assertIn("TABLE users", messages[1]["content"])
+            self.assertIn("TABLE refunds", messages[1]["content"])
+            self.assertNotIn("tools", messages[0])
 
     def test_rl_and_hidden_eval_formats(self) -> None:
-        rl_records = self._read_jsonl(self.output / "agent_rl_train.jsonl")
+        rl_records = self._read_jsonl(self.output / "sql_rl_train.jsonl")
         test_prompts = self._read_jsonl(self.output / "eval_test_prompts.jsonl")
         self.assertEqual(len(rl_records), self.config.train_size)
         self.assertTrue(all(record["reference_sql"] for record in rl_records))
         self.assertTrue(all(len(record["expected_result_hash"]) == 64 for record in rl_records))
         self.assertTrue(all("sql" not in record for record in test_prompts))
+        self.assertTrue(all([message["role"] for message in record["messages"]] == ["system", "user"] for record in rl_records))
 
     def test_independent_validator_reexecutes_every_reference(self) -> None:
         report = validate_training_data(self.database_path, self.output)
         self.assertTrue(report["valid"])
         self.assertEqual(report["canonical_records"], 68)
-        self.assertEqual(report["repair_records"], self.config.train_size)
+        self.assertEqual(report["sql_sft_records"], self.config.train_size + self.config.dev_size)
+        self.assertEqual(report["sql_rl_records"], self.config.train_size)
 
     def test_generation_is_reproducible(self) -> None:
         second_output = self.root / "training_second"

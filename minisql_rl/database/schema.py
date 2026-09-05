@@ -32,6 +32,7 @@ def get_schema_context(
     *,
     include_views: bool = True,
     selected_objects: list[str] | None = None,
+    compact: bool = False,
 ) -> str:
     """Return concise, deterministic schema text suitable for a prompt."""
 
@@ -66,6 +67,9 @@ def get_schema_context(
             columns = connection.execute(f'PRAGMA table_info("{escaped_name}")').fetchall()
             parts = []
             for _, column_name, data_type, not_null, default_value, primary_key in columns:
+                if compact:
+                    parts.append(f"{column_name}{' PK' if primary_key else ''}")
+                    continue
                 attributes = []
                 if primary_key:
                     attributes.append("PK")
@@ -77,7 +81,8 @@ def get_schema_context(
                 parts.append(f"{column_name} {data_type}{suffix}".strip())
             label = "VIEW" if object_type == "view" else "TABLE"
             description = TABLE_DESCRIPTIONS.get(name, "")
-            lines.append(f"{label} {name} ({', '.join(parts)}) -- {description}")
+            separator = " # " if compact else " -- "
+            lines.append(f"{label} {name} ({', '.join(parts)}){separator}{description}")
 
         foreign_keys = []
         for name, object_type in objects:
@@ -87,8 +92,11 @@ def get_schema_context(
             for row in connection.execute(f'PRAGMA foreign_key_list("{escaped_name}")'):
                 foreign_keys.append(f"{name}.{row[3]} -> {row[2]}.{row[4]}")
         if foreign_keys:
-            lines.append("外键关系：")
-            lines.extend(f"- {relationship}" for relationship in sorted(foreign_keys))
+            if compact:
+                lines.append("FK: " + "; ".join(sorted(foreign_keys)))
+            else:
+                lines.append("外键关系：")
+                lines.extend(f"- {relationship}" for relationship in sorted(foreign_keys))
         return "\n".join(lines)
     finally:
         connection.close()

@@ -73,6 +73,10 @@ class DatabaseTestCase(unittest.TestCase):
         self.assertIn("TABLE orders", context)
         self.assertIn("VIEW order_amounts", context)
         self.assertIn("order_items.order_id -> orders.id", context)
+        compact = get_schema_context(self.database_path, compact=True)
+        self.assertIn("TABLE users (id PK, username", compact)
+        self.assertIn("FK: ", compact)
+        self.assertLess(len(compact), len(context))
         selected = get_schema_context(
             self.database_path,
             include_views=False,

@@ -1,6 +1,6 @@
 # MiniSQL-RL
 
-MiniSQL-RL 是一个基于 MiniMind 的轻量级 Text-to-SQL Agent 项目。当前阶段提供可复现的电商 SQLite 数据库、只读 SQL 沙箱、面向模型提示词的 Schema 导出，以及一组执行结果确定的种子评测题。
+MiniSQL-RL 是一个基于 MiniMind 的轻量级 Text-to-SQL 项目。模型接收完整的电商数据库 Schema 和自然语言问题，直接生成只读 SQLite 查询；外部执行器负责安全运行 SQL，并以执行结果一致性作为评测指标和后续 GRPO 的可验证奖励。
 
 ## 数据库包含什么
 
@@ -21,7 +21,7 @@ MiniSQL-RL 是一个基于 MiniMind 的轻量级 Text-to-SQL Agent 项目。当�
 | `order_amounts` | 订单应付金额视图 |
 | `product_sales` | 商品累计销售视图 |
 
-所有模拟数据由固定随机种子生成。相同参数会得到相同的业务数据，便于对 SFT、Schema Linker 和 GRPO 实验做公平比较。
+所有模拟数据由固定随机种子生成。相同参数会得到相同的业务数据，便于对通用 SFT、SQL SFT 和 GRPO 实验做公平比较。
 
 ## 快速开始
 
@@ -103,16 +103,16 @@ python -m minisql_rl.data_pipeline.build
 - `train`：1,200 条，覆盖 11 个常见查询模板族；
 - `dev`：150 条，覆盖 3 个训练集未出现的组合查询模板族；
 - `test`：150 条，覆盖 3 个更复杂的隐藏模板族；
-- SFT 训练集中约 25% 为“错误 SQL → 数据库报错 → 修正 SQL”的多轮轨迹。
+- SFT 输入始终提供完整数据库 Schema，避免提前泄漏答案涉及的表；输出只包含标准 SQL。
 
 生成目录中的主要文件：
 
 | 文件 | 用途 |
 |---|---|
 | `canonical_train/dev/test.jsonl` | 问题、标准 SQL、执行结果和结果哈希，是评测真值源 |
-| `sft_train.jsonl` | MiniMind `SFTDataset` 可读取的 Tool Call 和纠错训练数据 |
-| `sft_dev.jsonl` | 开发集 SFT 格式数据，用于检查 loss 或人工抽样 |
-| `agent_rl_train.jsonl` | SQL Agent-RL Prompt、参考 SQL 和结果哈希 |
+| `sql_sft_train.jsonl` | MiniMind `SFTDataset` 可读取的直接 SQL 监督数据 |
+| `sql_sft_dev.jsonl` | 开发集直接 SQL 监督数据，用于检查 loss 或人工抽样 |
+| `sql_rl_train.jsonl` | GRPO 输入、参考 SQL、样本信息和预期结果哈希 |
 | `eval_dev_prompts.jsonl` | 不包含标准 SQL 的开发集推理输入 |
 | `eval_test_prompts.jsonl` | 不包含标准 SQL 的测试集推理输入 |
 | `manifest.json` | 配置、数据分布、拒绝原因、文件哈希和泄漏检查 |
@@ -123,8 +123,7 @@ python -m minisql_rl.data_pipeline.build
 python -m minisql_rl.data_pipeline.build \
   --train-size 8000 \
   --dev-size 500 \
-  --test-size 500 \
-  --repair-ratio 0.30
+  --test-size 500
 ```
 
 流水线不会直接信任模板生成的 SQL。每个样本都要先通过只读沙箱真实执行；执行失败、空结果、无信息标量、结果过大和重复样本会被拒绝并重新采样。
@@ -137,7 +136,7 @@ python -m minisql_rl.data_pipeline.build \
 python -m minisql_rl.data_pipeline.validate
 ```
 
-`agent_rl_train.jsonl` 已经保存 SQL 执行奖励所需的 `reference_sql` 和 `expected_result_hash`，但不能直接交给原版 `trainer/train_agent.py`：原脚本只会执行天气、计算器等模拟工具。后续需要接入 `query_database` 工具和基于结果哈希的 SQL Reward。
+`sql_rl_train.jsonl` 已保存执行奖励所需的 `reference_sql` 和 `expected_result_hash`，但不能直接交给原版通用 `trainer/train_grpo.py`。后续需要实现 SQL 输出提取、沙箱批量执行和基于结果哈希的 GRPO Reward。
 
 ## 数据口径
 

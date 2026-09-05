@@ -21,7 +21,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-size", type=int, default=1200)
     parser.add_argument("--dev-size", type=int, default=150)
     parser.add_argument("--test-size", type=int, default=150)
-    parser.add_argument("--repair-ratio", type=float, default=0.25)
     parser.add_argument("--maximum-result-cells", type=int, default=80)
     return parser.parse_args()
 
@@ -33,7 +32,6 @@ def main() -> None:
         train_size=args.train_size,
         dev_size=args.dev_size,
         test_size=args.test_size,
-        repair_ratio=args.repair_ratio,
         maximum_result_cells=args.maximum_result_cells,
     )
     manifest = build_training_data(args.db_path, args.output_dir, config)

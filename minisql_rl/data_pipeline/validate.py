@@ -87,30 +87,37 @@ def validate_training_data(database_path: str | Path, data_directory: str | Path
     if any(overlaps.values()):
         raise ValueError(f"query-family leakage detected: {overlaps}")
 
-    sft_train = _read_jsonl(directory / "sft_train.jsonl")
-    sft_dev = _read_jsonl(directory / "sft_dev.jsonl")
+    sft_train = _read_jsonl(directory / "sql_sft_train.jsonl")
+    sft_dev = _read_jsonl(directory / "sql_sft_dev.jsonl")
     if len(sft_train) != len(splits["train"]) or len(sft_dev) != len(splits["dev"]):
         raise ValueError("SFT and canonical split sizes do not match")
     role_patterns: Counter[str] = Counter()
-    repair_count = 0
-    for index, record in enumerate(sft_train + sft_dev):
+    paired_sft = list(zip(sft_train, splits["train"])) + list(zip(sft_dev, splits["dev"]))
+    for index, (record, canonical) in enumerate(paired_sft):
         conversations = record.get("conversations")
-        if not isinstance(conversations, list) or len(conversations) < 5:
+        if not isinstance(conversations, list) or len(conversations) != 3:
             raise ValueError(f"invalid SFT conversations at record {index}")
         roles = [message.get("role") for message in conversations]
-        if roles[:2] != ["system", "user"] or roles[-3:] != ["assistant", "tool", "assistant"]:
+        if roles != ["system", "user", "assistant"]:
             raise ValueError(f"invalid role sequence at SFT record {index}: {roles}")
-        if not conversations[0].get("tools"):
-            raise ValueError(f"missing tools at SFT record {index}")
+        if any(message.get("tools") or message.get("tool_calls") for message in conversations):
+            raise ValueError(f"unexpected tool fields at SFT record {index}")
+        if conversations[-1].get("content", "").strip() != canonical["sql"].strip():
+            raise ValueError(f"SFT target mismatch for {canonical['id']}")
+        if "TABLE users" not in conversations[1].get("content", "") or "TABLE refunds" not in conversations[1].get("content", ""):
+            raise ValueError(f"incomplete schema context for {canonical['id']}")
         role_patterns["->".join(roles)] += 1
-        repair_count += int(len(conversations) == 7)
 
-    rl_records = _read_jsonl(directory / "agent_rl_train.jsonl")
+    rl_records = _read_jsonl(directory / "sql_rl_train.jsonl")
     if len(rl_records) != len(splits["train"]):
-        raise ValueError("Agent-RL and canonical train sizes do not match")
-    for index, record in enumerate(rl_records):
+        raise ValueError("SQL-RL and canonical train sizes do not match")
+    for index, (record, canonical) in enumerate(zip(rl_records, splits["train"])):
         if not record.get("expected_result_hash") or not record.get("reference_sql"):
-            raise ValueError(f"invalid Agent-RL record {index}")
+            raise ValueError(f"invalid SQL-RL record {index}")
+        if record.get("sample_id") != canonical["id"]:
+            raise ValueError(f"SQL-RL sample mismatch at record {index}")
+        if [message.get("role") for message in record.get("messages", [])] != ["system", "user"]:
+            raise ValueError(f"invalid SQL-RL messages at record {index}")
 
     return {
         "valid": True,
@@ -119,8 +126,8 @@ def validate_training_data(database_path: str | Path, data_directory: str | Path
         "family_counts": {split: len(families) for split, families in family_sets.items()},
         "family_overlaps": overlaps,
         "sft_role_patterns": dict(sorted(role_patterns.items())),
-        "repair_records": repair_count,
-        "agent_rl_records": len(rl_records),
+        "sql_sft_records": len(sft_train) + len(sft_dev),
+        "sql_rl_records": len(rl_records),
     }
 
 

@@ -13,7 +13,7 @@ from typing import Any, Iterable
 
 from minisql_rl.database import SQLSandbox
 
-from .formats import to_agent_rl_record, to_eval_prompt, to_sft_record
+from .formats import to_eval_prompt, to_sql_rl_record, to_sql_sft_record
 from .templates import QueryFamily, families_for_split, load_template_context
 
 
@@ -23,15 +23,12 @@ class PipelineConfig:
     train_size: int = 1200
     dev_size: int = 150
     test_size: int = 150
-    repair_ratio: float = 0.25
     maximum_result_cells: int = 80
     maximum_attempt_multiplier: int = 200
 
     def validate(self) -> None:
         if min(self.train_size, self.dev_size, self.test_size) < 1:
             raise ValueError("all split sizes must be positive")
-        if not 0 <= self.repair_ratio <= 1:
-            raise ValueError("repair_ratio must be between 0 and 1")
         if self.maximum_result_cells < 1:
             raise ValueError("maximum_result_cells must be positive")
 
@@ -167,7 +164,7 @@ def build_training_data(
     output_directory: str | Path,
     config: PipelineConfig | None = None,
 ) -> dict[str, Any]:
-    """Build canonical, SFT, evaluation and Agent-RL JSONL artifacts."""
+    """Build canonical, direct-SQL SFT, evaluation and SQL-RL artifacts."""
 
     config = config or PipelineConfig()
     config.validate()
@@ -175,6 +172,13 @@ def build_training_data(
     output = Path(output_directory).expanduser().resolve()
     if not database.is_file():
         raise FileNotFoundError(f"database does not exist: {database}")
+
+    # Remove artifacts from the previous tool-call/Agent-oriented format so an
+    # in-place rebuild cannot leave a misleading mixed dataset manifest.
+    for legacy_name in ("sft_train.jsonl", "sft_dev.jsonl", "agent_rl_train.jsonl"):
+        legacy_path = output / legacy_name
+        if legacy_path.is_file():
+            legacy_path.unlink()
 
     sandbox = SQLSandbox(database, row_limit=100, timeout_seconds=3.0)
     context = load_template_context(database)
@@ -203,20 +207,11 @@ def build_training_data(
     if family_sets["train"] & family_sets["dev"] or family_sets["train"] & family_sets["test"] or family_sets["dev"] & family_sets["test"]:
         raise RuntimeError("query-family leakage detected across splits")
 
-    repair_rng = random.Random(config.seed + 30_000)
-    repair_ids = {
-        record["id"]
-        for record in splits["train"]
-        if repair_rng.random() < config.repair_ratio
-    }
-    sft_train = [
-        to_sft_record(str(database), sandbox, record, repair=record["id"] in repair_ids)
-        for record in splits["train"]
-    ]
-    sft_dev = [to_sft_record(str(database), sandbox, record, repair=False) for record in splits["dev"]]
-    _write_jsonl(output / "sft_train.jsonl", sft_train)
-    _write_jsonl(output / "sft_dev.jsonl", sft_dev)
-    _write_jsonl(output / "agent_rl_train.jsonl", (to_agent_rl_record(str(database), record) for record in splits["train"]))
+    sft_train = [to_sql_sft_record(str(database), record) for record in splits["train"]]
+    sft_dev = [to_sql_sft_record(str(database), record) for record in splits["dev"]]
+    _write_jsonl(output / "sql_sft_train.jsonl", sft_train)
+    _write_jsonl(output / "sql_sft_dev.jsonl", sft_dev)
+    _write_jsonl(output / "sql_rl_train.jsonl", (to_sql_rl_record(str(database), record) for record in splits["train"]))
     _write_jsonl(output / "eval_dev_prompts.jsonl", (to_eval_prompt(str(database), record) for record in splits["dev"]))
     _write_jsonl(output / "eval_test_prompts.jsonl", (to_eval_prompt(str(database), record) for record in splits["test"]))
 
@@ -239,8 +234,7 @@ def build_training_data(
         "sft": {
             "train_count": len(sft_train),
             "dev_count": len(sft_dev),
-            "repair_count": len(repair_ids),
-            "repair_ratio_actual": round(len(repair_ids) / len(sft_train), 4),
+            "target": "direct_sql",
         },
         "leakage_checks": {
             "family_overlap_train_dev": [],
