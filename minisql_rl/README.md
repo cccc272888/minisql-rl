@@ -138,6 +138,29 @@ python -m minisql_rl.data_pipeline.validate
 
 `sql_rl_train.jsonl` 已保存执行奖励所需的 `reference_sql` 和 `expected_result_hash`，但不能直接交给原版通用 `trainer/train_grpo.py`。后续需要实现 SQL 输出提取、沙箱批量执行和基于结果哈希的 GRPO Reward。
 
+## 执行结果评测
+
+在领域 SFT 前先评测通用 `full_sft` 权重，保存零领域训练基线。建议先运行 20 条冒烟测试：
+
+```bash
+python -m minisql_rl.evaluation.evaluate_model \
+  --weight-path out/full_sft_768.pth \
+  --split dev \
+  --limit 20 \
+  --batch-size 4 \
+  --output-path logs/sql_baseline_dev_smoke.jsonl
+```
+
+冒烟测试通过后移除 `--limit`，运行完整开发集。评测器会用贪心解码批量生成 SQL，将其放入只读沙箱执行，并输出：
+
+- `strict_format_rate`：是否严格只输出 `SELECT/WITH` 查询；
+- `sql_extraction_rate`：是否可以从回答中提取查询；
+- `executable_rate`：SQL 是否能在目标数据库成功执行；
+- `execution_accuracy`：生成 SQL 与标准 SQL 的执行结果是否一致；
+- `by_family`：各隐藏查询族的执行正确率。
+
+调参阶段使用 `dev`，最终模型确定后再在 `test` 上做一次最终评测，避免根据测试集反复调整训练配置。
+
 ## 数据口径
 
 - 明细销售额：`quantity * unit_price - discount_amount`；
