@@ -198,7 +198,10 @@ def build_training_data(
     rejections: dict[str, dict[str, int]] = {}
     global_seen: set[tuple[str, str]] = set()
 
-    for split, size in sizes.items():
+    # Reserve held-out parameter combinations for development before the much
+    # larger training split consumes finite template spaces.
+    for split in ("dev", "train", "test"):
+        size = sizes[split]
         records, rejected = _generate_split(
             split,
             size,
@@ -210,7 +213,6 @@ def build_training_data(
         )
         splits[split] = records
         rejections[split] = dict(sorted(rejected.items()))
-        _write_jsonl(output / f"canonical_{split}.jsonl", records)
 
     family_sets = {
         split: {record["family_id"] for record in records}
@@ -220,6 +222,11 @@ def build_training_data(
         raise RuntimeError("train and dev must cover the same trainable query families")
     if family_sets["train"] & family_sets["test"] or family_sets["dev"] & family_sets["test"]:
         raise RuntimeError("held-out test query-family leakage detected")
+
+    # Do not modify any canonical artifact until every split has been generated
+    # and the split invariants have passed.
+    for split in ("train", "dev", "test"):
+        _write_jsonl(output / f"canonical_{split}.jsonl", splits[split])
 
     sft_train = [to_sql_sft_record(str(database), record) for record in splits["train"]]
     sft_dev = [to_sql_sft_record(str(database), record) for record in splits["dev"]]

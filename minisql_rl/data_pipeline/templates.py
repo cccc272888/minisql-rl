@@ -99,7 +99,13 @@ def _products_in_price_range(rng: random.Random, ctx: TemplateContext) -> QueryS
     lower = rng.randrange(0, 3001, 50)
     upper = lower + rng.choice([100, 200, 300, 500, 800, 1000, 2000, 3000])
     status, status_cn = rng.choice([("active", "在售"), ("inactive", "已下架")])
-    question = f"价格在{lower}元到{upper}元之间的{status_cn}商品有多少个？"
+    question = rng.choice(
+        [
+            f"价格在{lower}元到{upper}元之间的{status_cn}商品有多少个？",
+            f"统计标价不低于{lower}元且低于{upper}元的{status_cn}商品数量。",
+            f"{status_cn}商品中，价格落在[{lower}, {upper})元区间的一共有多少种？",
+        ]
+    )
     sql = (
         "SELECT COUNT(*) AS product_count FROM products "
         f"WHERE status = {_quoted(status)} AND list_price >= {lower} AND list_price < {upper}"
@@ -112,7 +118,13 @@ def _inventory_risk(rng: random.Random, ctx: TemplateContext) -> QuerySpec:
     category = rng.choice(ctx.child_categories)
     extra = rng.choice([0, 5, 10, 20])
     comparison = "低于安全库存" if extra == 0 else f"低于安全库存加{extra}件"
-    question = f"{warehouse}中{category}分类里，库存{comparison}的商品有多少种？"
+    question = rng.choice(
+        [
+            f"{warehouse}中{category}分类里，库存{comparison}的商品有多少种？",
+            f"统计{warehouse}的{category}商品中库存{comparison}的商品数量。",
+            f"{warehouse}里有多少种{category}商品的库存{comparison}？",
+        ]
+    )
     sql = f"""SELECT COUNT(*) AS risky_product_count
 FROM inventory i JOIN warehouses w ON w.id = i.warehouse_id
 JOIN products p ON p.id = i.product_id JOIN categories c ON c.id = p.category_id
@@ -251,7 +263,13 @@ def _category_inventory_value(rng: random.Random, ctx: TemplateContext) -> Query
     child = rng.choice(ctx.child_categories)
     top_k = rng.randint(2, 4)
     price_column, price_label = rng.choice([("cost_price", "成本价"), ("list_price", "商品标价")])
-    question = f"{child}分类在各仓库按{price_label}计算的库存金额是多少？列出最高的{top_k}个仓库。"
+    question = rng.choice(
+        [
+            f"{child}分类在各仓库按{price_label}计算的库存金额是多少？列出最高的{top_k}个仓库。",
+            f"按{price_label}统计{child}商品的分仓库存价值，并返回金额最高的{top_k}个仓库。",
+            f"{child}分类的库存按{price_label}折算后，价值排名前{top_k}的仓库有哪些？",
+        ]
+    )
     sql = f"""SELECT w.name, ROUND(SUM(i.stock_quantity * p.{price_column}), 2) AS inventory_value
 FROM inventory i JOIN warehouses w ON w.id = i.warehouse_id
 JOIN products p ON p.id = i.product_id JOIN categories c ON c.id = p.category_id
