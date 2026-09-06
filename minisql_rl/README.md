@@ -98,11 +98,12 @@ python -m minisql_rl.database.build --overwrite
 python -m minisql_rl.data_pipeline.build
 ```
 
-默认生成 1,650 条经过数据库真实执行的数据：
+默认生成 2,250 条经过数据库真实执行的数据：
 
 - `train`：1,200 条，覆盖 21 个 easy / medium / hard 可训练查询族；
 - `dev`：150 条，覆盖相同的 21 个查询族，但问题与 SQL 参数组合不和训练集重复；
 - `challenge`：150 条，复现第一版的 3 个困难查询族，用于分析和课程训练调参；
+- `composition_train`：600 条，与 Challenge 同查询族但参数组合完全不重复；
 - `test`：150 条，覆盖另外 3 个只重组已见基础算子的隐藏查询族；
 - SFT 输入始终提供完整数据库 Schema，避免提前泄漏答案涉及的表；输出只包含标准 SQL。
 
@@ -110,9 +111,11 @@ python -m minisql_rl.data_pipeline.build
 
 | 文件 | 用途 |
 |---|---|
-| `canonical_train/dev/challenge/test.jsonl` | 问题、标准 SQL、执行结果、算子标签和结果哈希 |
+| `canonical_train/dev/challenge/composition_train/test.jsonl` | 问题、标准 SQL、执行结果、算子标签和结果哈希 |
 | `sql_sft_train.jsonl` | MiniMind `SFTDataset` 可读取的直接 SQL 监督数据 |
 | `sql_sft_dev.jsonl` | 开发集直接 SQL 监督数据，用于检查 loss 或人工抽样 |
+| `sql_composition_sft_train.jsonl` | 三个已知困难组合族的非重叠训练样本 |
+| `sql_curriculum_stage2_sft_train.jsonl` | 基础8,000条与组合样本的确定性混合回放数据 |
 | `sql_rl_train.jsonl` | GRPO 输入、参考 SQL、样本信息和预期结果哈希 |
 | `eval_dev_prompts.jsonl` | 不包含标准 SQL 的开发集推理输入 |
 | `eval_challenge_prompts.jsonl` | 第一版困难查询族的推理输入，用于调参和错误分析 |
@@ -126,6 +129,7 @@ python -m minisql_rl.data_pipeline.build \
   --train-size 8000 \
   --dev-size 500 \
   --challenge-size 500 \
+  --composition-train-size 2400 \
   --test-size 500
 ```
 
@@ -139,6 +143,10 @@ python -m minisql_rl.data_pipeline.build \
 生成器为每个查询族声明 SQL 基础算子集合，并强制检查 Challenge/Test 的所有基础算子都已在
 Train 出现，同时保持查询族完全隔离。这样测试衡量的是“已见算子的未见组合”，而不是要求小模型
 零样本发明训练中从未出现的 SQL 语法。
+
+`composition_train` 是第二阶段课程数据：它和 Challenge 共享三个组合查询族，但生成器先保留
+Challenge，再生成训练样本，并对所有问题/SQL 参数组合全局去重。因此 Challenge 可以衡量同组合族
+下的新参数与新日期泛化；新的 Test 仍与全部训练查询族隔离。
 
 独立复验全部标准 SQL 和数据格式：
 
@@ -187,6 +195,7 @@ python -m minisql_rl.data_pipeline.build \
   --train-size 8000 \
   --dev-size 500 \
   --challenge-size 500 \
+  --composition-train-size 2400 \
   --test-size 500
 
 python -m minisql_rl.data_pipeline.validate
@@ -209,6 +218,29 @@ python train_full_sft.py \
 
 训练完成后先比较 `dev` 和 `challenge`：`dev` 用于检查旧能力是否遗忘，`challenge` 用于观察三个
 已知困难组合是否改善。在确定课程方案前不查看新 `test`。
+
+第一阶段桥接课程完成后，模型在旧版 Dev 保持 98.8%，在21族 Dev 达到94.2%，但 Challenge 仍为
+0%。逐例分析显示模型已能生成每个子查询，却只会选择其中一个：用户题漏掉订单门槛，退款率题漏掉
+退款聚合，月趋势题漏掉销售额。因此第二阶段使用2,400条完整组合样本，同时回放8,000条基础数据：
+
+```bash
+cd trainer
+python train_full_sft.py \
+  --data_path ../minisql_rl/data/generated/training/sql_curriculum_stage2_sft_train.jsonl \
+  --from_weight sql_curriculum_sft \
+  --save_weight sql_composition_sft \
+  --epochs 1 \
+  --batch_size 4 \
+  --accumulation_steps 4 \
+  --max_seq_len 1536 \
+  --learning_rate 5e-7 \
+  --num_workers 8 \
+  --dtype bfloat16 \
+  --save_interval 500 \
+  --log_interval 20
+```
+
+该阶段不直接训练 Challenge 的500条样本；混合回放用于降低只学三个组合族而遗忘原有21族的风险。
 
 ## SQL 执行反馈 GRPO
 

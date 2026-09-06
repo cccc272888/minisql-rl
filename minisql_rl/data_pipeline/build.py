@@ -21,6 +21,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-size", type=int, default=1200)
     parser.add_argument("--dev-size", type=int, default=150)
     parser.add_argument("--challenge-size", type=int, default=150)
+    parser.add_argument("--composition-train-size", type=int, default=600)
     parser.add_argument("--test-size", type=int, default=150)
     parser.add_argument("--maximum-result-cells", type=int, default=80)
     return parser.parse_args()
@@ -33,6 +34,7 @@ def main() -> None:
         train_size=args.train_size,
         dev_size=args.dev_size,
         challenge_size=args.challenge_size,
+        composition_train_size=args.composition_train_size,
         test_size=args.test_size,
         maximum_result_cells=args.maximum_result_cells,
     )

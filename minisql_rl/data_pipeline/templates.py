@@ -593,7 +593,7 @@ def load_template_context(database_path: str | Path) -> TemplateContext:
 def families_for_split(split: str) -> tuple[QueryFamily, ...]:
     if split in {"train", "dev"}:
         pool = "trainable"
-    elif split == "challenge":
+    elif split in {"challenge", "composition_train"}:
         pool = "challenge"
     elif split == "test":
         pool = "heldout"

@@ -65,7 +65,7 @@ def validate_training_data(database_path: str | Path, data_directory: str | Path
     family_sets: dict[str, set[str]] = {}
     sample_keys: dict[str, set[tuple[str, str]]] = {}
 
-    split_names = ("train", "dev", "challenge", "test")
+    split_names = ("train", "dev", "challenge", "composition_train", "test")
     for split in split_names:
         path = directory / f"canonical_{split}.jsonl"
         records = _read_jsonl(path)
@@ -100,10 +100,12 @@ def validate_training_data(database_path: str | Path, data_directory: str | Path
     }
     if family_sets["train"] != family_sets["dev"]:
         raise ValueError("train and dev must cover the same trainable query families")
+    if family_sets["composition_train"] != family_sets["challenge"]:
+        raise ValueError("composition_train and challenge must cover the same query families")
     unexpected_family_overlaps = {
         name: values
         for name, values in family_overlaps.items()
-        if name != "train_dev" and values
+        if name not in {"train_dev", "challenge_composition_train"} and values
     }
     if unexpected_family_overlaps:
         raise ValueError(f"held-out query-family leakage detected: {unexpected_family_overlaps}")
@@ -133,10 +135,20 @@ def validate_training_data(database_path: str | Path, data_directory: str | Path
 
     sft_train = _read_jsonl(directory / "sql_sft_train.jsonl")
     sft_dev = _read_jsonl(directory / "sql_sft_dev.jsonl")
+    composition_sft = _read_jsonl(directory / "sql_composition_sft_train.jsonl")
+    curriculum_stage2_sft = _read_jsonl(directory / "sql_curriculum_stage2_sft_train.jsonl")
     if len(sft_train) != len(splits["train"]) or len(sft_dev) != len(splits["dev"]):
         raise ValueError("SFT and canonical split sizes do not match")
+    if len(composition_sft) != len(splits["composition_train"]):
+        raise ValueError("composition SFT and canonical split sizes do not match")
+    if len(curriculum_stage2_sft) != len(sft_train) + len(composition_sft):
+        raise ValueError("curriculum stage-2 SFT size does not match its source datasets")
     role_patterns: Counter[str] = Counter()
-    paired_sft = list(zip(sft_train, splits["train"])) + list(zip(sft_dev, splits["dev"]))
+    paired_sft = (
+        list(zip(sft_train, splits["train"]))
+        + list(zip(sft_dev, splits["dev"]))
+        + list(zip(composition_sft, splits["composition_train"]))
+    )
     for index, (record, canonical) in enumerate(paired_sft):
         conversations = record.get("conversations")
         if not isinstance(conversations, list) or len(conversations) != 3:
@@ -151,6 +163,15 @@ def validate_training_data(database_path: str | Path, data_directory: str | Path
         if "TABLE users" not in conversations[1].get("content", "") or "TABLE refunds" not in conversations[1].get("content", ""):
             raise ValueError(f"incomplete schema context for {canonical['id']}")
         role_patterns["->".join(roles)] += 1
+
+    def serialized_counter(records: list[dict[str, Any]]) -> Counter[str]:
+        return Counter(
+            json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            for record in records
+        )
+
+    if serialized_counter(curriculum_stage2_sft) != serialized_counter(sft_train + composition_sft):
+        raise ValueError("curriculum stage-2 SFT is not an exact shuffled union of base and composition data")
 
     rl_records = _read_jsonl(directory / "sql_rl_train.jsonl")
     if len(rl_records) != len(splits["train"]):
@@ -176,6 +197,8 @@ def validate_training_data(database_path: str | Path, data_directory: str | Path
         "sample_overlap_counts": {name: len(values) for name, values in sample_overlaps.items()},
         "sft_role_patterns": dict(sorted(role_patterns.items())),
         "sql_sft_records": len(sft_train) + len(sft_dev),
+        "sql_composition_sft_records": len(composition_sft),
+        "sql_curriculum_stage2_sft_records": len(curriculum_stage2_sft),
         "sql_rl_records": len(rl_records),
     }
 

@@ -23,6 +23,7 @@ class PipelineConfig:
     train_size: int = 1200
     dev_size: int = 150
     challenge_size: int = 150
+    composition_train_size: int = 600
     test_size: int = 150
     maximum_result_cells: int = 80
     maximum_attempt_multiplier: int = 200
@@ -32,6 +33,7 @@ class PipelineConfig:
             "train": self.train_size,
             "dev": self.dev_size,
             "challenge": self.challenge_size,
+            "composition_train": self.composition_train_size,
             "test": self.test_size,
         }
         if min(sizes.values()) < 1:
@@ -214,16 +216,23 @@ def build_training_data(
         "train": config.train_size,
         "dev": config.dev_size,
         "challenge": config.challenge_size,
+        "composition_train": config.composition_train_size,
         "test": config.test_size,
     }
-    seed_offsets = {"train": 0, "dev": 10_000, "challenge": 20_000, "test": 30_000}
+    seed_offsets = {
+        "train": 0,
+        "dev": 10_000,
+        "challenge": 20_000,
+        "composition_train": 25_000,
+        "test": 30_000,
+    }
     splits: dict[str, list[dict[str, Any]]] = {}
     rejections: dict[str, dict[str, int]] = {}
     global_seen: set[tuple[str, str]] = set()
 
     # Reserve held-out parameter combinations for development before the much
     # larger training split consumes finite template spaces.
-    for split in ("dev", "train", "challenge", "test"):
+    for split in ("dev", "train", "challenge", "composition_train", "test"):
         size = sizes[split]
         records, rejected = _generate_split(
             split,
@@ -243,6 +252,8 @@ def build_training_data(
     }
     if family_sets["train"] != family_sets["dev"]:
         raise RuntimeError("train and dev must cover the same trainable query families")
+    if family_sets["composition_train"] != family_sets["challenge"]:
+        raise RuntimeError("composition_train and challenge must cover the same query families")
     heldout_sets = {"challenge": family_sets["challenge"], "test": family_sets["test"]}
     for heldout_name, heldout_families in heldout_sets.items():
         if family_sets["train"] & heldout_families or family_sets["dev"] & heldout_families:
@@ -269,20 +280,28 @@ def build_training_data(
 
     # Do not modify any canonical artifact until every split has been generated
     # and the split invariants have passed.
-    for split in ("train", "dev", "challenge", "test"):
+    for split in ("train", "dev", "challenge", "composition_train", "test"):
         _write_jsonl(output / f"canonical_{split}.jsonl", splits[split])
 
     sft_train = [to_sql_sft_record(str(database), record) for record in splits["train"]]
     sft_dev = [to_sql_sft_record(str(database), record) for record in splits["dev"]]
+    composition_sft = [
+        to_sql_sft_record(str(database), record)
+        for record in splits["composition_train"]
+    ]
+    curriculum_stage2_sft = sft_train + composition_sft
+    random.Random(config.seed + 40_000).shuffle(curriculum_stage2_sft)
     _write_jsonl(output / "sql_sft_train.jsonl", sft_train)
     _write_jsonl(output / "sql_sft_dev.jsonl", sft_dev)
+    _write_jsonl(output / "sql_composition_sft_train.jsonl", composition_sft)
+    _write_jsonl(output / "sql_curriculum_stage2_sft_train.jsonl", curriculum_stage2_sft)
     _write_jsonl(output / "sql_rl_train.jsonl", (to_sql_rl_record(str(database), record) for record in splits["train"]))
     _write_jsonl(output / "eval_dev_prompts.jsonl", (to_eval_prompt(str(database), record) for record in splits["dev"]))
     _write_jsonl(output / "eval_challenge_prompts.jsonl", (to_eval_prompt(str(database), record) for record in splits["challenge"]))
     _write_jsonl(output / "eval_test_prompts.jsonl", (to_eval_prompt(str(database), record) for record in splits["test"]))
 
     manifest: dict[str, Any] = {
-        "version": 3,
+        "version": 4,
         "pipeline_config": asdict(config),
         "database": {
             "path": str(database),
@@ -300,10 +319,13 @@ def build_training_data(
         "sft": {
             "train_count": len(sft_train),
             "dev_count": len(sft_dev),
+            "composition_train_count": len(composition_sft),
+            "curriculum_stage2_train_count": len(curriculum_stage2_sft),
             "target": "direct_sql",
         },
         "leakage_checks": {
             "train_dev_shared_families": sorted(family_sets["train"]),
+            "challenge_composition_shared_families": sorted(family_sets["challenge"]),
             "family_overlap_train_challenge": [],
             "family_overlap_train_test": [],
             "family_overlap_challenge_test": [],
