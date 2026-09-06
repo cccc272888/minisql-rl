@@ -278,6 +278,135 @@ GROUP BY w.id, w.name ORDER BY inventory_value DESC, w.id LIMIT {top_k}"""
     return QuerySpec("category_inventory_value", "hard", question, sql, ("inventory", "warehouses", "products", "categories"), {"child_category": child, "price_column": price_column, "top_k": top_k})
 
 
+def _user_order_ranking(rng: random.Random, ctx: TemplateContext) -> QuerySpec:
+    start, end, label = ctx.period(rng, minimum_days=30)
+    top_k = rng.randint(3, 10)
+    question = rng.choice(
+        [
+            f"{label}有效订单数量最多的{top_k}位用户是谁？",
+            f"列出{label}按有效订单数排名前{top_k}的用户。",
+            f"{label}哪些用户下的有效订单最多？返回前{top_k}位。",
+        ]
+    )
+    sql = f"""SELECT u.username, COUNT(DISTINCT o.id) AS order_count
+FROM users u JOIN orders o ON o.user_id = u.id
+WHERE o.status != 'cancelled' AND o.created_at >= {_quoted(start)} AND o.created_at < {_quoted(end)}
+GROUP BY u.id, u.username ORDER BY order_count DESC, u.id LIMIT {top_k}"""
+    return QuerySpec("user_order_ranking", "medium", question, sql, ("users", "orders"), {"start": start, "end": end, "top_k": top_k})
+
+
+def _user_spending_ranking(rng: random.Random, ctx: TemplateContext) -> QuerySpec:
+    start, end, label = ctx.period(rng, minimum_days=30)
+    top_k = rng.randint(3, 10)
+    question = rng.choice(
+        [
+            f"{label}消费金额最高的{top_k}位用户是谁？",
+            f"统计{label}用户消费额并列出前{top_k}名。",
+            f"{label}按有效订单商品金额排名，返回消费最高的{top_k}位用户。",
+        ]
+    )
+    sql = f"""SELECT u.username,
+ROUND(SUM(oi.quantity * oi.unit_price - oi.discount_amount), 2) AS spending
+FROM users u JOIN orders o ON o.user_id = u.id JOIN order_items oi ON oi.order_id = o.id
+WHERE o.status != 'cancelled' AND o.created_at >= {_quoted(start)} AND o.created_at < {_quoted(end)}
+GROUP BY u.id, u.username ORDER BY spending DESC, u.id LIMIT {top_k}"""
+    return QuerySpec("user_spending_ranking", "medium", question, sql, ("users", "orders", "order_items"), {"start": start, "end": end, "top_k": top_k})
+
+
+def _product_units_threshold(rng: random.Random, ctx: TemplateContext) -> QuerySpec:
+    start, end, label = ctx.period(rng, minimum_days=30)
+    minimum_units = rng.choice([1, 2, 3, 5, 10])
+    top_k = rng.randint(3, 10)
+    question = rng.choice(
+        [
+            f"{label}至少售出{minimum_units}件的商品中，销量最高的{top_k}个是什么？",
+            f"列出{label}销量不低于{minimum_units}件的商品，按销量返回前{top_k}名。",
+            f"{label}累计售出至少{minimum_units}件且销量最高的{top_k}个商品有哪些？",
+        ]
+    )
+    sql = f"""SELECT p.name, SUM(oi.quantity) AS units_sold
+FROM products p JOIN order_items oi ON oi.product_id = p.id
+JOIN orders o ON o.id = oi.order_id
+WHERE o.status != 'cancelled' AND o.created_at >= {_quoted(start)} AND o.created_at < {_quoted(end)}
+GROUP BY p.id, p.name HAVING SUM(oi.quantity) >= {minimum_units}
+ORDER BY units_sold DESC, p.id LIMIT {top_k}"""
+    return QuerySpec("product_units_threshold", "medium", question, sql, ("products", "order_items", "orders"), {"start": start, "end": end, "minimum_units": minimum_units, "top_k": top_k})
+
+
+def _product_approved_refunds(rng: random.Random, ctx: TemplateContext) -> QuerySpec:
+    start, end, label = ctx.period(rng, minimum_days=60)
+    top_k = rng.randint(3, 8)
+    question = rng.choice(
+        [
+            f"{label}已批准退款明细数量最多的{top_k}个商品是什么？",
+            f"按已批准退款明细数统计{label}的商品，返回前{top_k}名。",
+            f"{label}哪些商品对应的已批准退款明细最多？列出前{top_k}个。",
+        ]
+    )
+    approved_count = "COUNT(DISTINCT CASE WHEN r.status = 'approved' THEN r.id END)"
+    sql = f"""SELECT p.name,
+{approved_count} AS approved_refund_items
+FROM products p JOIN order_items oi ON oi.product_id = p.id
+JOIN orders o ON o.id = oi.order_id LEFT JOIN refunds r ON r.order_item_id = oi.id
+WHERE o.status != 'cancelled' AND o.created_at >= {_quoted(start)} AND o.created_at < {_quoted(end)}
+GROUP BY p.id, p.name HAVING {approved_count} >= 1
+ORDER BY approved_refund_items DESC, p.id LIMIT {top_k}"""
+    return QuerySpec("product_approved_refunds", "hard", question, sql, ("products", "order_items", "orders", "refunds"), {"start": start, "end": end, "top_k": top_k})
+
+
+def _monthly_order_count(rng: random.Random, ctx: TemplateContext) -> QuerySpec:
+    start, end, label = ctx.period(rng, minimum_days=90)
+    question = rng.choice(
+        [
+            f"统计{label}每个月的有效订单数量，按月份排列。",
+            f"{label}各月份分别有多少笔有效订单？",
+            f"按月汇总{label}的有效订单数并按月份升序返回。",
+        ]
+    )
+    sql = f"""SELECT strftime('%Y-%m', created_at) AS month,
+COUNT(DISTINCT id) AS order_count
+FROM orders
+WHERE status != 'cancelled' AND created_at >= {_quoted(start)} AND created_at < {_quoted(end)}
+GROUP BY month ORDER BY month"""
+    return QuerySpec("monthly_order_count", "medium", question, sql, ("orders",), {"start": start, "end": end})
+
+
+def _monthly_revenue(rng: random.Random, ctx: TemplateContext) -> QuerySpec:
+    start, end, label = ctx.period(rng, minimum_days=90)
+    question = rng.choice(
+        [
+            f"统计{label}每个月的有效订单销售额，按月份排列。",
+            f"{label}各月份的有效订单销售额分别是多少？",
+            f"按月汇总{label}的有效订单商品金额并按月份升序返回。",
+        ]
+    )
+    sql = f"""SELECT strftime('%Y-%m', o.created_at) AS month,
+ROUND(SUM(oi.quantity * oi.unit_price - oi.discount_amount), 2) AS revenue
+FROM orders o JOIN order_items oi ON oi.order_id = o.id
+WHERE o.status != 'cancelled' AND o.created_at >= {_quoted(start)} AND o.created_at < {_quoted(end)}
+GROUP BY month ORDER BY month"""
+    return QuerySpec("monthly_revenue", "medium", question, sql, ("orders", "order_items"), {"start": start, "end": end})
+
+
+def _payment_success_rate(rng: random.Random, ctx: TemplateContext) -> QuerySpec:
+    start, end, label = ctx.period(rng, minimum_days=30)
+    question = rng.choice(
+        [
+            f"统计{label}各支付方式的支付总数、成功数和成功率。",
+            f"{label}每种支付方式的成功支付占比是多少？同时返回总笔数和成功笔数。",
+            f"按支付方式汇总{label}的支付成功率，并按成功率降序排列。",
+        ]
+    )
+    success_count = "SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END)"
+    sql = f"""SELECT payment_method, COUNT(*) AS payment_count,
+{success_count} AS success_count,
+ROUND({success_count} * 1.0 / COUNT(*), 4) AS success_rate
+FROM payments
+WHERE paid_at >= {_quoted(start)} AND paid_at < {_quoted(end)}
+GROUP BY payment_method ORDER BY success_rate DESC, payment_method"""
+    return QuerySpec("payment_success_rate", "hard", question, sql, ("payments",), {"start": start, "end": end})
+
+
 def _product_refund_rate(rng: random.Random, ctx: TemplateContext) -> QuerySpec:
     start, end, label = ctx.period(rng, minimum_days=30)
     top_k = rng.randint(3, 8)
@@ -320,6 +449,51 @@ GROUP BY month ORDER BY month"""
     return QuerySpec("monthly_sales_trend", "hard", question, sql, ("orders", "order_items"), {"start": start, "end": end})
 
 
+def _brand_refund_rate(rng: random.Random, ctx: TemplateContext) -> QuerySpec:
+    start, end, label = ctx.period(rng, minimum_days=90)
+    minimum_units = rng.choice([3, 5, 10])
+    top_k = rng.randint(3, 6)
+    approved_count = "COUNT(DISTINCT CASE WHEN r.status = 'approved' THEN r.id END)"
+    question = f"{label}至少售出{minimum_units}件的品牌中，已批准退款明细占比最高的{top_k}个是哪些？"
+    sql = f"""SELECT p.brand, SUM(oi.quantity) AS units_sold,
+{approved_count} AS approved_refund_items,
+ROUND({approved_count} * 1.0 / SUM(oi.quantity), 4) AS refund_rate
+FROM products p JOIN order_items oi ON oi.product_id = p.id
+JOIN orders o ON o.id = oi.order_id LEFT JOIN refunds r ON r.order_item_id = oi.id
+WHERE o.status != 'cancelled' AND o.created_at >= {_quoted(start)} AND o.created_at < {_quoted(end)}
+GROUP BY p.brand HAVING SUM(oi.quantity) >= {minimum_units}
+ORDER BY refund_rate DESC, units_sold DESC, p.brand LIMIT {top_k}"""
+    return QuerySpec("brand_refund_rate", "hard", question, sql, ("products", "order_items", "orders", "refunds"), {"start": start, "end": end, "minimum_units": minimum_units, "top_k": top_k})
+
+
+def _monthly_refund_trend(rng: random.Random, ctx: TemplateContext) -> QuerySpec:
+    start, end, label = ctx.period(rng, minimum_days=90)
+    approved_count = "SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END)"
+    question = f"统计{label}每个月的退款申请数、已批准数量和已批准金额，按月份排列。"
+    sql = f"""SELECT strftime('%Y-%m', created_at) AS month,
+COUNT(*) AS refund_count, {approved_count} AS approved_count,
+ROUND(SUM(CASE WHEN status = 'approved' THEN amount ELSE 0 END), 2) AS approved_amount
+FROM refunds
+WHERE created_at >= {_quoted(start)} AND created_at < {_quoted(end)}
+GROUP BY month ORDER BY month"""
+    return QuerySpec("monthly_refund_trend", "hard", question, sql, ("refunds",), {"start": start, "end": end})
+
+
+def _city_customer_value(rng: random.Random, ctx: TemplateContext) -> QuerySpec:
+    start, end, label = ctx.period(rng, minimum_days=60)
+    minimum_orders = rng.choice([2, 3, 5, 8])
+    top_k = rng.randint(3, min(8, len(ctx.cities)))
+    question = f"{label}至少有{minimum_orders}笔有效订单的收货城市中，销售额最高的{top_k}个是哪些？同时返回用户数和订单数。"
+    sql = f"""SELECT o.shipping_city, COUNT(DISTINCT o.user_id) AS user_count,
+COUNT(DISTINCT o.id) AS order_count,
+ROUND(SUM(oi.quantity * oi.unit_price - oi.discount_amount), 2) AS revenue
+FROM orders o JOIN order_items oi ON oi.order_id = o.id
+WHERE o.status != 'cancelled' AND o.created_at >= {_quoted(start)} AND o.created_at < {_quoted(end)}
+GROUP BY o.shipping_city HAVING COUNT(DISTINCT o.id) >= {minimum_orders}
+ORDER BY revenue DESC, o.shipping_city LIMIT {top_k}"""
+    return QuerySpec("city_customer_value", "hard", question, sql, ("orders", "order_items"), {"start": start, "end": end, "minimum_orders": minimum_orders, "top_k": top_k})
+
+
 QUERY_FAMILIES = (
     QueryFamily("order_count_period", "trainable", "easy", _count_orders),
     QueryFamily("user_segment_count", "trainable", "easy", _registered_users),
@@ -335,10 +509,58 @@ QUERY_FAMILIES = (
     QueryFamily("repeat_customers", "trainable", "hard", _repeat_customers),
     QueryFamily("member_average_order", "trainable", "hard", _member_average_order),
     QueryFamily("category_inventory_value", "trainable", "hard", _category_inventory_value),
-    QueryFamily("product_refund_rate", "heldout", "hard", _product_refund_rate),
-    QueryFamily("high_value_users", "heldout", "hard", _high_value_users),
-    QueryFamily("monthly_sales_trend", "heldout", "hard", _monthly_sales_trend),
+    QueryFamily("user_order_ranking", "trainable", "medium", _user_order_ranking),
+    QueryFamily("user_spending_ranking", "trainable", "medium", _user_spending_ranking),
+    QueryFamily("product_units_threshold", "trainable", "medium", _product_units_threshold),
+    QueryFamily("product_approved_refunds", "trainable", "hard", _product_approved_refunds),
+    QueryFamily("monthly_order_count", "trainable", "medium", _monthly_order_count),
+    QueryFamily("monthly_revenue", "trainable", "medium", _monthly_revenue),
+    QueryFamily("payment_success_rate", "trainable", "hard", _payment_success_rate),
+    QueryFamily("product_refund_rate", "challenge", "hard", _product_refund_rate),
+    QueryFamily("high_value_users", "challenge", "hard", _high_value_users),
+    QueryFamily("monthly_sales_trend", "challenge", "hard", _monthly_sales_trend),
+    QueryFamily("brand_refund_rate", "heldout", "hard", _brand_refund_rate),
+    QueryFamily("monthly_refund_trend", "heldout", "hard", _monthly_refund_trend),
+    QueryFamily("city_customer_value", "heldout", "hard", _city_customer_value),
 )
+
+
+SQL_PRIMITIVES_BY_FAMILY: dict[str, tuple[str, ...]] = {
+    "order_count_period": ("filter", "aggregate_count"),
+    "user_segment_count": ("filter", "aggregate_count"),
+    "products_price_range": ("filter", "aggregate_count"),
+    "inventory_risk": ("inner_join", "filter", "aggregate_count", "arithmetic"),
+    "top_products_revenue": ("inner_join", "filter", "aggregate_sum", "arithmetic", "group_by", "order_by", "limit"),
+    "city_revenue": ("inner_join", "filter", "aggregate_sum", "arithmetic", "group_by", "order_by", "limit"),
+    "category_revenue": ("inner_join", "filter", "aggregate_sum", "arithmetic", "group_by", "order_by", "limit"),
+    "payment_summary": ("filter", "aggregate_count", "aggregate_sum", "group_by", "order_by"),
+    "refund_reasons": ("filter", "aggregate_count", "aggregate_sum", "group_by", "order_by", "limit"),
+    "brand_sales": ("inner_join", "filter", "aggregate_sum", "arithmetic", "group_by", "order_by", "limit"),
+    "province_high_value_orders": ("inner_join", "filter", "aggregate_count", "aggregate_sum", "arithmetic", "group_by", "having", "subquery"),
+    "repeat_customers": ("filter", "aggregate_count", "group_by", "having", "subquery"),
+    "member_average_order": ("inner_join", "filter", "aggregate_avg"),
+    "category_inventory_value": ("inner_join", "filter", "aggregate_sum", "arithmetic", "group_by", "order_by", "limit"),
+    "user_order_ranking": ("inner_join", "filter", "count_distinct", "group_by", "order_by", "limit"),
+    "user_spending_ranking": ("inner_join", "filter", "aggregate_sum", "arithmetic", "group_by", "order_by", "limit"),
+    "product_units_threshold": ("inner_join", "filter", "aggregate_sum", "group_by", "having", "order_by", "limit"),
+    "product_approved_refunds": ("inner_join", "left_join", "filter", "count_distinct", "conditional_aggregation", "group_by", "having", "order_by", "limit"),
+    "monthly_order_count": ("filter", "date_bucket_month", "count_distinct", "group_by", "order_by"),
+    "monthly_revenue": ("inner_join", "filter", "date_bucket_month", "aggregate_sum", "arithmetic", "group_by", "order_by"),
+    "payment_success_rate": ("filter", "aggregate_count", "aggregate_sum", "conditional_aggregation", "ratio", "group_by", "order_by"),
+    "product_refund_rate": ("inner_join", "left_join", "filter", "aggregate_sum", "count_distinct", "conditional_aggregation", "ratio", "group_by", "having", "order_by", "limit"),
+    "high_value_users": ("inner_join", "filter", "aggregate_sum", "count_distinct", "arithmetic", "group_by", "having", "order_by", "limit"),
+    "monthly_sales_trend": ("inner_join", "filter", "date_bucket_month", "aggregate_sum", "count_distinct", "arithmetic", "group_by", "order_by"),
+    "brand_refund_rate": ("inner_join", "left_join", "filter", "aggregate_sum", "count_distinct", "conditional_aggregation", "ratio", "group_by", "having", "order_by", "limit"),
+    "monthly_refund_trend": ("filter", "date_bucket_month", "aggregate_count", "aggregate_sum", "conditional_aggregation", "group_by", "order_by"),
+    "city_customer_value": ("inner_join", "filter", "aggregate_sum", "count_distinct", "arithmetic", "group_by", "having", "order_by", "limit"),
+}
+
+
+def primitives_for_family(family_id: str) -> tuple[str, ...]:
+    try:
+        return SQL_PRIMITIVES_BY_FAMILY[family_id]
+    except KeyError as error:
+        raise ValueError(f"SQL primitives are not declared for family: {family_id}") from error
 
 
 def load_template_context(database_path: str | Path) -> TemplateContext:
@@ -371,6 +593,8 @@ def load_template_context(database_path: str | Path) -> TemplateContext:
 def families_for_split(split: str) -> tuple[QueryFamily, ...]:
     if split in {"train", "dev"}:
         pool = "trainable"
+    elif split == "challenge":
+        pool = "challenge"
     elif split == "test":
         pool = "heldout"
     else:

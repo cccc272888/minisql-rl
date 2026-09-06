@@ -98,24 +98,26 @@ python -m minisql_rl.database.build --overwrite
 python -m minisql_rl.data_pipeline.build
 ```
 
-默认生成 1,500 条经过数据库真实执行的数据：
+默认生成 1,650 条经过数据库真实执行的数据：
 
-- `train`：1,200 条，覆盖 14 个 easy / medium / hard 可训练查询族；
-- `dev`：150 条，覆盖相同的 14 个查询族，但问题与 SQL 参数组合不和训练集重复；
-- `test`：150 条，覆盖 3 个更复杂的隐藏模板族；
+- `train`：1,200 条，覆盖 21 个 easy / medium / hard 可训练查询族；
+- `dev`：150 条，覆盖相同的 21 个查询族，但问题与 SQL 参数组合不和训练集重复；
+- `challenge`：150 条，复现第一版的 3 个困难查询族，用于分析和课程训练调参；
+- `test`：150 条，覆盖另外 3 个只重组已见基础算子的隐藏查询族；
 - SFT 输入始终提供完整数据库 Schema，避免提前泄漏答案涉及的表；输出只包含标准 SQL。
 
 生成目录中的主要文件：
 
 | 文件 | 用途 |
 |---|---|
-| `canonical_train/dev/test.jsonl` | 问题、标准 SQL、执行结果和结果哈希，是评测真值源 |
+| `canonical_train/dev/challenge/test.jsonl` | 问题、标准 SQL、执行结果、算子标签和结果哈希 |
 | `sql_sft_train.jsonl` | MiniMind `SFTDataset` 可读取的直接 SQL 监督数据 |
 | `sql_sft_dev.jsonl` | 开发集直接 SQL 监督数据，用于检查 loss 或人工抽样 |
 | `sql_rl_train.jsonl` | GRPO 输入、参考 SQL、样本信息和预期结果哈希 |
 | `eval_dev_prompts.jsonl` | 不包含标准 SQL 的开发集推理输入 |
+| `eval_challenge_prompts.jsonl` | 第一版困难查询族的推理输入，用于调参和错误分析 |
 | `eval_test_prompts.jsonl` | 不包含标准 SQL 的测试集推理输入 |
-| `manifest.json` | 配置、数据分布、拒绝原因、文件哈希和泄漏检查 |
+| `manifest.json` | 配置、数据分布、SQL 算子覆盖、文件哈希和泄漏检查 |
 
 可自定义规模：
 
@@ -123,12 +125,20 @@ python -m minisql_rl.data_pipeline.build
 python -m minisql_rl.data_pipeline.build \
   --train-size 8000 \
   --dev-size 500 \
+  --challenge-size 500 \
   --test-size 500
 ```
 
 流水线不会直接信任模板生成的 SQL。每个样本都要先通过只读沙箱真实执行；执行失败、空结果、无信息标量、结果过大和重复样本会被拒绝并重新采样。
 
-训练集和开发集覆盖相同的14个查询族，用于训练和超参数选择，但通过全局去重保证两者没有重复的“问题 + SQL”参数组合。测试集使用3个完全隐藏的 hard 查询族，不与训练/开发查询族重叠，用于单独评估未见 SQL 结构上的组合泛化能力。报告指标时应明确区分 in-domain Dev 与 held-out-family Test，避免将两种难度混为一谈。
+训练集和开发集覆盖相同的21个查询族，用于训练和超参数选择，但通过全局去重保证两者没有重复的
+“问题 + SQL”参数组合。新增的桥接查询族分别教授 `COUNT(DISTINCT)`、`LEFT JOIN`、条件聚合、
+聚合比率、`HAVING`、月份分桶和用户级聚合。Challenge 保留第一版测试中的三个困难组合，用于衡量
+课程 SFT 是否解决已知失败；新的 Test 使用三个完全不同的组合族。
+
+生成器为每个查询族声明 SQL 基础算子集合，并强制检查 Challenge/Test 的所有基础算子都已在
+Train 出现，同时保持查询族完全隔离。这样测试衡量的是“已见算子的未见组合”，而不是要求小模型
+零样本发明训练中从未出现的 SQL 语法。
 
 独立复验全部标准 SQL 和数据格式：
 
@@ -136,7 +146,9 @@ python -m minisql_rl.data_pipeline.build \
 python -m minisql_rl.data_pipeline.validate
 ```
 
-`sql_rl_train.jsonl` 已保存执行奖励所需的 `reference_sql` 和 `expected_result_hash`，但不能直接交给原版通用 `trainer/train_grpo.py`。后续需要实现 SQL 输出提取、沙箱批量执行和基于结果哈希的 GRPO Reward。
+`sql_rl_train.jsonl` 保存了执行奖励所需的 `expected_result_hash`。SQL 专用训练入口不会把参考 SQL
+交给策略模型，也不会使用通用文本 Reward Model；它只把采样 SQL 放入只读沙箱，并根据执行状态与
+结果一致性计算可验证奖励。
 
 ## 执行结果评测
 
@@ -159,7 +171,94 @@ python -m minisql_rl.evaluation.evaluate_model \
 - `execution_accuracy`：生成 SQL 与标准 SQL 的执行结果值是否一致，列别名差异不影响结果；
 - `by_family`：各隐藏查询族的执行正确率。
 
-调参阶段使用 `dev`，最终模型确定后再在 `test` 上做一次最终评测，避免根据测试集反复调整训练配置。
+常规超参数使用 `dev`，组合课程效果使用 `challenge`；最终模型确定后再在新 `test` 上做一次最终
+评测，避免根据测试集反复调整训练配置。
+
+第一版领域 SFT 暴露出明显的组合泛化差距：同族 Dev Execution Accuracy 为 98.6%，但同时隐藏
+查询族和关键基础算子的旧 Test 为 0%。错误样例表现为日期与 `LIMIT` 参数提取正确，却将整条查询
+路由到最相近的商品销售、品牌销售或高价值订单模板。该结果保留为 Challenge 基线，不覆盖、不删除。
+
+## 组合课程 SFT
+
+重新生成 8,000 / 500 / 500 / 500 数据后，从已有领域 SFT 权重继续训练一轮：
+
+```bash
+python -m minisql_rl.data_pipeline.build \
+  --train-size 8000 \
+  --dev-size 500 \
+  --challenge-size 500 \
+  --test-size 500
+
+python -m minisql_rl.data_pipeline.validate
+
+cd trainer
+python train_full_sft.py \
+  --data_path ../minisql_rl/data/generated/training/sql_sft_train.jsonl \
+  --from_weight sql_sft \
+  --save_weight sql_curriculum_sft \
+  --epochs 1 \
+  --batch_size 4 \
+  --accumulation_steps 4 \
+  --max_seq_len 1536 \
+  --learning_rate 1e-6 \
+  --num_workers 8 \
+  --dtype bfloat16 \
+  --save_interval 500 \
+  --log_interval 20
+```
+
+训练完成后先比较 `dev` 和 `challenge`：`dev` 用于检查旧能力是否遗忘，`challenge` 用于观察三个
+已知困难组合是否改善。在确定课程方案前不查看新 `test`。
+
+## SQL 执行反馈 GRPO
+
+组合课程 SFT 建立基本泛化能力后，再审计随机采样是否能产生足够的组内奖励差异：
+
+```bash
+python trainer/train_sql_grpo.py \
+  --audit-only \
+  --weight-path out/sql_curriculum_sft_768.pth \
+  --max-samples 50 \
+  --max-steps 50 \
+  --num-generations 4 \
+  --temperature 0.8
+```
+
+审计结果中的 `active_group_rate` 表示：同一个问题的多条候选 SQL 中，至少出现两档不同奖励的
+问题比例。只有这些组能产生非零的组内相对优势。若该值过低，应先提高采样温度、增加候选数，或将
+训练样本集中到较难查询族，不能仅凭训练程序在运行就认为 GRPO 正在有效学习。
+
+建议先运行 50 步训练冒烟实验：
+
+```bash
+python trainer/train_sql_grpo.py \
+  --weight-path out/sql_sft_768.pth \
+  --output-path out/sql_grpo_smoke_768.pth \
+  --resume-path checkpoints/sql_grpo_smoke_768_resume.pth \
+  --max-samples 200 \
+  --max-steps 50 \
+  --batch-size 1 \
+  --num-generations 4 \
+  --temperature 0.8 \
+  --learning-rate 3e-7
+```
+
+奖励分为四级：无法提取 SQL、SQL 执行失败、可执行但结果错误、执行结果正确；严格遵循 SQL-only
+输出格式仅获得一个较小的附加奖励。训练只使用 `train`，仍用 `dev` 选择训练步数和采样参数。
+最终确定配置后，分别对 SQL SFT 与 GRPO 权重各运行一次隐藏 `test`，报告 GRPO 前后的
+Execution Accuracy，不能把 `dev` 样本用于强化学习。
+
+当前已完成的开发集实验结果：
+
+| 权重 | Strict Format | Executable | Execution Accuracy |
+|---|---:|---:|---:|
+| 通用 SFT（领域训练前） | 0.0% | 0.0% | 0.0% |
+| 500 条领域 SFT 冒烟实验 | 100.0% | 100.0% | 83.2% |
+| 8,000 条领域 SFT | 100.0% | 100.0% | 98.6% |
+
+其中 98.6% 表示 500 条 in-domain Dev 中有 493 条执行结果正确；另外 7 条均可执行，但查询语义或
+结果与标准答案不一致。该权重在旧版三个完全隔离查询族上的 Execution Accuracy 为 0%。空的
+`top_errors` 只表示没有 SQL 语法/执行异常，不表示不存在语义错误。
 
 ## 数据口径
 

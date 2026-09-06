@@ -14,7 +14,7 @@ from typing import Any, Iterable
 from minisql_rl.database import SQLSandbox
 
 from .formats import to_eval_prompt, to_sql_rl_record, to_sql_sft_record
-from .templates import QueryFamily, families_for_split, load_template_context
+from .templates import QueryFamily, families_for_split, load_template_context, primitives_for_family
 
 
 @dataclass(frozen=True)
@@ -22,15 +22,28 @@ class PipelineConfig:
     seed: int = 20260905
     train_size: int = 1200
     dev_size: int = 150
+    challenge_size: int = 150
     test_size: int = 150
     maximum_result_cells: int = 80
     maximum_attempt_multiplier: int = 200
 
     def validate(self) -> None:
-        if min(self.train_size, self.dev_size, self.test_size) < 1:
+        sizes = {
+            "train": self.train_size,
+            "dev": self.dev_size,
+            "challenge": self.challenge_size,
+            "test": self.test_size,
+        }
+        if min(sizes.values()) < 1:
             raise ValueError("all split sizes must be positive")
         if self.maximum_result_cells < 1:
             raise ValueError("maximum_result_cells must be positive")
+        for split, size in sizes.items():
+            family_count = len(families_for_split(split))
+            if size < family_count:
+                raise ValueError(
+                    f"{split}_size={size} cannot cover all {family_count} configured families"
+                )
 
 
 def _canonical_hash(_columns: list[str], rows: list[list[Any]]) -> str:
@@ -102,6 +115,10 @@ def _generate_split(
             family = families[family_cursor % len(families)]
             family_cursor += 1
         spec = family.build(rng, context)
+        if spec.family_id != family.family_id:
+            raise RuntimeError(
+                f"family builder mismatch: expected {family.family_id}, got {spec.family_id}"
+            )
         key = (spec.question.strip(), _normalized_sql(spec.sql))
         if key in seen:
             rejection_reasons["duplicate"] += 1
@@ -125,6 +142,7 @@ def _generate_split(
             "question": spec.question,
             "sql": spec.sql,
             "tables": list(spec.tables),
+            "sql_primitives": list(primitives_for_family(spec.family_id)),
             "parameters": spec.parameters,
             "expected": {"columns": result.columns, "rows": result.rows},
             "result_hash": _canonical_hash(result.columns, result.rows),
@@ -192,15 +210,20 @@ def build_training_data(
 
     sandbox = SQLSandbox(database, row_limit=100, timeout_seconds=3.0)
     context = load_template_context(database)
-    sizes = {"train": config.train_size, "dev": config.dev_size, "test": config.test_size}
-    seed_offsets = {"train": 0, "dev": 10_000, "test": 20_000}
+    sizes = {
+        "train": config.train_size,
+        "dev": config.dev_size,
+        "challenge": config.challenge_size,
+        "test": config.test_size,
+    }
+    seed_offsets = {"train": 0, "dev": 10_000, "challenge": 20_000, "test": 30_000}
     splits: dict[str, list[dict[str, Any]]] = {}
     rejections: dict[str, dict[str, int]] = {}
     global_seen: set[tuple[str, str]] = set()
 
     # Reserve held-out parameter combinations for development before the much
     # larger training split consumes finite template spaces.
-    for split in ("dev", "train", "test"):
+    for split in ("dev", "train", "challenge", "test"):
         size = sizes[split]
         records, rejected = _generate_split(
             split,
@@ -220,12 +243,33 @@ def build_training_data(
     }
     if family_sets["train"] != family_sets["dev"]:
         raise RuntimeError("train and dev must cover the same trainable query families")
-    if family_sets["train"] & family_sets["test"] or family_sets["dev"] & family_sets["test"]:
-        raise RuntimeError("held-out test query-family leakage detected")
+    heldout_sets = {"challenge": family_sets["challenge"], "test": family_sets["test"]}
+    for heldout_name, heldout_families in heldout_sets.items():
+        if family_sets["train"] & heldout_families or family_sets["dev"] & heldout_families:
+            raise RuntimeError(f"{heldout_name} query-family leakage detected")
+    if family_sets["challenge"] & family_sets["test"]:
+        raise RuntimeError("challenge/test query-family leakage detected")
+
+    primitive_sets = {
+        split: {
+            primitive
+            for record in records
+            for primitive in record["sql_primitives"]
+        }
+        for split, records in splits.items()
+    }
+    missing_primitives = {
+        split: sorted(primitive_sets[split] - primitive_sets["train"])
+        for split in ("challenge", "test")
+    }
+    if any(missing_primitives.values()):
+        raise RuntimeError(
+            f"held-out splits contain SQL primitives absent from training: {missing_primitives}"
+        )
 
     # Do not modify any canonical artifact until every split has been generated
     # and the split invariants have passed.
-    for split in ("train", "dev", "test"):
+    for split in ("train", "dev", "challenge", "test"):
         _write_jsonl(output / f"canonical_{split}.jsonl", splits[split])
 
     sft_train = [to_sql_sft_record(str(database), record) for record in splits["train"]]
@@ -234,10 +278,11 @@ def build_training_data(
     _write_jsonl(output / "sql_sft_dev.jsonl", sft_dev)
     _write_jsonl(output / "sql_rl_train.jsonl", (to_sql_rl_record(str(database), record) for record in splits["train"]))
     _write_jsonl(output / "eval_dev_prompts.jsonl", (to_eval_prompt(str(database), record) for record in splits["dev"]))
+    _write_jsonl(output / "eval_challenge_prompts.jsonl", (to_eval_prompt(str(database), record) for record in splits["challenge"]))
     _write_jsonl(output / "eval_test_prompts.jsonl", (to_eval_prompt(str(database), record) for record in splits["test"]))
 
     manifest: dict[str, Any] = {
-        "version": 2,
+        "version": 3,
         "pipeline_config": asdict(config),
         "database": {
             "path": str(database),
@@ -259,9 +304,17 @@ def build_training_data(
         },
         "leakage_checks": {
             "train_dev_shared_families": sorted(family_sets["train"]),
+            "family_overlap_train_challenge": [],
             "family_overlap_train_test": [],
+            "family_overlap_challenge_test": [],
             "family_overlap_dev_test": [],
             "duplicate_question_sql_across_splits": [],
+        },
+        "sql_primitive_coverage": {
+            "train": sorted(primitive_sets["train"]),
+            "challenge": sorted(primitive_sets["challenge"]),
+            "test": sorted(primitive_sets["test"]),
+            "missing_from_train": missing_primitives,
         },
         "files": {},
     }

@@ -21,6 +21,7 @@ REQUIRED_CANONICAL_FIELDS = {
     "question",
     "sql",
     "tables",
+    "sql_primitives",
     "parameters",
     "expected",
     "result_hash",
@@ -64,7 +65,8 @@ def validate_training_data(database_path: str | Path, data_directory: str | Path
     family_sets: dict[str, set[str]] = {}
     sample_keys: dict[str, set[tuple[str, str]]] = {}
 
-    for split in ("train", "dev", "test"):
+    split_names = ("train", "dev", "challenge", "test")
+    for split in split_names:
         path = directory / f"canonical_{split}.jsonl"
         records = _read_jsonl(path)
         splits[split] = records
@@ -92,19 +94,39 @@ def validate_training_data(database_path: str | Path, data_directory: str | Path
                 raise ValueError(f"stored result mismatch for {record['id']}")
 
     family_overlaps = {
-        "train_dev": sorted(family_sets["train"] & family_sets["dev"]),
-        "train_test": sorted(family_sets["train"] & family_sets["test"]),
-        "dev_test": sorted(family_sets["dev"] & family_sets["test"]),
+        f"{left}_{right}": sorted(family_sets[left] & family_sets[right])
+        for left_index, left in enumerate(split_names)
+        for right in split_names[left_index + 1:]
     }
     if family_sets["train"] != family_sets["dev"]:
         raise ValueError("train and dev must cover the same trainable query families")
-    if family_overlaps["train_test"] or family_overlaps["dev_test"]:
-        raise ValueError(f"held-out test query-family leakage detected: {family_overlaps}")
+    unexpected_family_overlaps = {
+        name: values
+        for name, values in family_overlaps.items()
+        if name != "train_dev" and values
+    }
+    if unexpected_family_overlaps:
+        raise ValueError(f"held-out query-family leakage detected: {unexpected_family_overlaps}")
+
+    primitive_sets = {
+        split: {
+            primitive
+            for record in records
+            for primitive in record["sql_primitives"]
+        }
+        for split, records in splits.items()
+    }
+    missing_primitives = {
+        split: sorted(primitive_sets[split] - primitive_sets["train"])
+        for split in ("challenge", "test")
+    }
+    if any(missing_primitives.values()):
+        raise ValueError(f"SQL primitive coverage violation: {missing_primitives}")
 
     sample_overlaps = {
-        "train_dev": sorted(sample_keys["train"] & sample_keys["dev"]),
-        "train_test": sorted(sample_keys["train"] & sample_keys["test"]),
-        "dev_test": sorted(sample_keys["dev"] & sample_keys["test"]),
+        f"{left}_{right}": sorted(sample_keys[left] & sample_keys[right])
+        for left_index, left in enumerate(split_names)
+        for right in split_names[left_index + 1:]
     }
     if any(sample_overlaps.values()):
         raise ValueError("duplicate question/SQL pairs detected across splits")
@@ -147,6 +169,10 @@ def validate_training_data(database_path: str | Path, data_directory: str | Path
         "split_counts": {split: len(records) for split, records in splits.items()},
         "family_counts": {split: len(families) for split, families in family_sets.items()},
         "family_overlaps": family_overlaps,
+        "sql_primitive_coverage": {
+            "counts": {split: len(values) for split, values in primitive_sets.items()},
+            "missing_from_train": missing_primitives,
+        },
         "sample_overlap_counts": {name: len(values) for name, values in sample_overlaps.items()},
         "sft_role_patterns": dict(sorted(role_patterns.items())),
         "sql_sft_records": len(sft_train) + len(sft_dev),

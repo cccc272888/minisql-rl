@@ -194,7 +194,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tokenizer-path", type=Path, default=REPOSITORY_ROOT / "model")
     parser.add_argument("--database-path", type=Path, default=PACKAGE_ROOT / "data" / "generated" / "ecommerce.db")
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIRECTORY)
-    parser.add_argument("--split", choices=["dev", "test"], default="dev")
+    parser.add_argument("--split", choices=["dev", "challenge", "test"], default="dev")
     parser.add_argument("--output-path", type=Path, default=REPOSITORY_ROOT / "logs" / "sql_baseline_dev.jsonl")
     parser.add_argument("--limit", type=int, default=0, help="0 means evaluate the complete split")
     parser.add_argument("--batch-size", type=int, default=4)
