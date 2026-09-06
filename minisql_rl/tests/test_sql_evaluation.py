@@ -42,6 +42,9 @@ class SQLEvaluationTestCase(unittest.TestCase):
         self.assertFalse(wrong["execution_correct"])
         self.assertFalse(invalid["executable"])
 
+    def test_result_hash_ignores_column_aliases(self) -> None:
+        self.assertEqual(result_hash(["left_alias"], [[1]]), result_hash(["right_alias"], [[1]]))
+
 
 if __name__ == "__main__":
     unittest.main()

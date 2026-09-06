@@ -50,7 +50,7 @@ TemplateBuilder = Callable[[random.Random, TemplateContext], QuerySpec]
 @dataclass(frozen=True)
 class QueryFamily:
     family_id: str
-    split: str
+    pool: str
     difficulty: str
     build: TemplateBuilder
 
@@ -303,23 +303,23 @@ GROUP BY month ORDER BY month"""
 
 
 QUERY_FAMILIES = (
-    QueryFamily("order_count_period", "train", "easy", _count_orders),
-    QueryFamily("user_segment_count", "train", "easy", _registered_users),
-    QueryFamily("products_price_range", "train", "easy", _products_in_price_range),
-    QueryFamily("inventory_risk", "train", "easy", _inventory_risk),
-    QueryFamily("top_products_revenue", "train", "medium", _top_products_revenue),
-    QueryFamily("city_revenue", "train", "medium", _city_revenue),
-    QueryFamily("category_revenue", "train", "medium", _category_revenue),
-    QueryFamily("payment_summary", "train", "medium", _payment_summary),
-    QueryFamily("refund_reasons", "train", "medium", _refund_reasons),
-    QueryFamily("brand_sales", "train", "medium", _brand_sales),
-    QueryFamily("province_high_value_orders", "train", "medium", _province_orders),
-    QueryFamily("repeat_customers", "dev", "hard", _repeat_customers),
-    QueryFamily("member_average_order", "dev", "hard", _member_average_order),
-    QueryFamily("category_inventory_value", "dev", "hard", _category_inventory_value),
-    QueryFamily("product_refund_rate", "test", "hard", _product_refund_rate),
-    QueryFamily("high_value_users", "test", "hard", _high_value_users),
-    QueryFamily("monthly_sales_trend", "test", "hard", _monthly_sales_trend),
+    QueryFamily("order_count_period", "trainable", "easy", _count_orders),
+    QueryFamily("user_segment_count", "trainable", "easy", _registered_users),
+    QueryFamily("products_price_range", "trainable", "easy", _products_in_price_range),
+    QueryFamily("inventory_risk", "trainable", "easy", _inventory_risk),
+    QueryFamily("top_products_revenue", "trainable", "medium", _top_products_revenue),
+    QueryFamily("city_revenue", "trainable", "medium", _city_revenue),
+    QueryFamily("category_revenue", "trainable", "medium", _category_revenue),
+    QueryFamily("payment_summary", "trainable", "medium", _payment_summary),
+    QueryFamily("refund_reasons", "trainable", "medium", _refund_reasons),
+    QueryFamily("brand_sales", "trainable", "medium", _brand_sales),
+    QueryFamily("province_high_value_orders", "trainable", "medium", _province_orders),
+    QueryFamily("repeat_customers", "trainable", "hard", _repeat_customers),
+    QueryFamily("member_average_order", "trainable", "hard", _member_average_order),
+    QueryFamily("category_inventory_value", "trainable", "hard", _category_inventory_value),
+    QueryFamily("product_refund_rate", "heldout", "hard", _product_refund_rate),
+    QueryFamily("high_value_users", "heldout", "hard", _high_value_users),
+    QueryFamily("monthly_sales_trend", "heldout", "hard", _monthly_sales_trend),
 )
 
 
@@ -351,7 +351,13 @@ def load_template_context(database_path: str | Path) -> TemplateContext:
 
 
 def families_for_split(split: str) -> tuple[QueryFamily, ...]:
-    families = tuple(family for family in QUERY_FAMILIES if family.split == split)
+    if split in {"train", "dev"}:
+        pool = "trainable"
+    elif split == "test":
+        pool = "heldout"
+    else:
+        raise ValueError(f"unknown split: {split}")
+    families = tuple(family for family in QUERY_FAMILIES if family.pool == pool)
     if not families:
         raise ValueError(f"no query families configured for split: {split}")
     return families

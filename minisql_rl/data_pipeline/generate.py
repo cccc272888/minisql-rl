@@ -33,9 +33,11 @@ class PipelineConfig:
             raise ValueError("maximum_result_cells must be positive")
 
 
-def _canonical_hash(columns: list[str], rows: list[list[Any]]) -> str:
+def _canonical_hash(_columns: list[str], rows: list[list[Any]]) -> str:
+    # Column aliases are not part of execution semantics. Keeping row values
+    # and their positional order still distinguishes different projections.
     text = json.dumps(
-        {"columns": columns, "rows": rows},
+        {"rows": rows},
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -77,22 +79,28 @@ def _generate_split(
     sandbox: SQLSandbox,
     context: Any,
     config: PipelineConfig,
+    seen: set[tuple[str, str]] | None = None,
 ) -> tuple[list[dict[str, Any]], Counter[str]]:
     rng = random.Random(seed)
     families = families_for_split(split)
     records: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    seen = seen if seen is not None else set()
     rejection_reasons: Counter[str] = Counter()
     family_cursor = 0
+    uncovered_families = list(families)
     maximum_attempts = size * config.maximum_attempt_multiplier
 
     for _ in range(maximum_attempts):
         if len(records) >= size:
             break
-        # Round-robin keeps every family represented; shuffling parameters still
-        # yields a deterministic but balanced dataset.
-        family: QueryFamily = families[family_cursor % len(families)]
-        family_cursor += 1
+        # First guarantee at least one accepted sample from every family. Then
+        # use round-robin attempts; finite parameter spaces may still produce
+        # different final counts after duplicate or empty-result rejection.
+        if uncovered_families:
+            family = uncovered_families[0]
+        else:
+            family = families[family_cursor % len(families)]
+            family_cursor += 1
         spec = family.build(rng, context)
         key = (spec.question.strip(), _normalized_sql(spec.sql))
         if key in seen:
@@ -122,6 +130,8 @@ def _generate_split(
             "result_hash": _canonical_hash(result.columns, result.rows),
         }
         records.append(record)
+        if uncovered_families and family is uncovered_families[0]:
+            uncovered_families.pop(0)
 
     if len(records) != size:
         raise RuntimeError(
@@ -186,6 +196,7 @@ def build_training_data(
     seed_offsets = {"train": 0, "dev": 10_000, "test": 20_000}
     splits: dict[str, list[dict[str, Any]]] = {}
     rejections: dict[str, dict[str, int]] = {}
+    global_seen: set[tuple[str, str]] = set()
 
     for split, size in sizes.items():
         records, rejected = _generate_split(
@@ -195,6 +206,7 @@ def build_training_data(
             sandbox,
             context,
             config,
+            global_seen,
         )
         splits[split] = records
         rejections[split] = dict(sorted(rejected.items()))
@@ -204,8 +216,10 @@ def build_training_data(
         split: {record["family_id"] for record in records}
         for split, records in splits.items()
     }
-    if family_sets["train"] & family_sets["dev"] or family_sets["train"] & family_sets["test"] or family_sets["dev"] & family_sets["test"]:
-        raise RuntimeError("query-family leakage detected across splits")
+    if family_sets["train"] != family_sets["dev"]:
+        raise RuntimeError("train and dev must cover the same trainable query families")
+    if family_sets["train"] & family_sets["test"] or family_sets["dev"] & family_sets["test"]:
+        raise RuntimeError("held-out test query-family leakage detected")
 
     sft_train = [to_sql_sft_record(str(database), record) for record in splits["train"]]
     sft_dev = [to_sql_sft_record(str(database), record) for record in splits["dev"]]
@@ -216,7 +230,7 @@ def build_training_data(
     _write_jsonl(output / "eval_test_prompts.jsonl", (to_eval_prompt(str(database), record) for record in splits["test"]))
 
     manifest: dict[str, Any] = {
-        "version": 1,
+        "version": 2,
         "pipeline_config": asdict(config),
         "database": {
             "path": str(database),
@@ -237,9 +251,10 @@ def build_training_data(
             "target": "direct_sql",
         },
         "leakage_checks": {
-            "family_overlap_train_dev": [],
+            "train_dev_shared_families": sorted(family_sets["train"]),
             "family_overlap_train_test": [],
             "family_overlap_dev_test": [],
+            "duplicate_question_sql_across_splits": [],
         },
         "files": {},
     }

@@ -15,11 +15,11 @@ _FENCE_PATTERN = re.compile(r"```(?:sql|sqlite)?\s*(.*?)```", flags=re.IGNORECAS
 _SQL_START_PATTERN = re.compile(r"\b(?:SELECT|WITH)\b", flags=re.IGNORECASE)
 
 
-def result_hash(columns: list[str], rows: list[list[Any]]) -> str:
-    """Return the same deterministic result hash used by the data pipeline."""
+def result_hash(_columns: list[str], rows: list[list[Any]]) -> str:
+    """Hash result values while ignoring semantically irrelevant column aliases."""
 
     payload = json.dumps(
-        {"columns": columns, "rows": rows},
+        {"rows": rows},
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),

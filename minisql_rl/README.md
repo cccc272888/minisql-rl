@@ -100,8 +100,8 @@ python -m minisql_rl.data_pipeline.build
 
 默认生成 1,500 条经过数据库真实执行的数据：
 
-- `train`：1,200 条，覆盖 11 个常见查询模板族；
-- `dev`：150 条，覆盖 3 个训练集未出现的组合查询模板族；
+- `train`：1,200 条，覆盖 14 个 easy / medium / hard 可训练查询族；
+- `dev`：150 条，覆盖相同的 14 个查询族，但问题与 SQL 参数组合不和训练集重复；
 - `test`：150 条，覆盖 3 个更复杂的隐藏模板族；
 - SFT 输入始终提供完整数据库 Schema，避免提前泄漏答案涉及的表；输出只包含标准 SQL。
 
@@ -128,7 +128,7 @@ python -m minisql_rl.data_pipeline.build \
 
 流水线不会直接信任模板生成的 SQL。每个样本都要先通过只读沙箱真实执行；执行失败、空结果、无信息标量、结果过大和重复样本会被拒绝并重新采样。
 
-数据集按 SQL 模板族切分，而不是先生成全部样本再随机切行，因此同一模板族不会同时出现在训练集和测试集。这会让测试分数更接近组合泛化能力，避免只替换日期和数字造成的数据泄漏。
+训练集和开发集覆盖相同的14个查询族，用于训练和超参数选择，但通过全局去重保证两者没有重复的“问题 + SQL”参数组合。测试集使用3个完全隐藏的 hard 查询族，不与训练/开发查询族重叠，用于单独评估未见 SQL 结构上的组合泛化能力。报告指标时应明确区分 in-domain Dev 与 held-out-family Test，避免将两种难度混为一谈。
 
 独立复验全部标准 SQL 和数据格式：
 
@@ -156,7 +156,7 @@ python -m minisql_rl.evaluation.evaluate_model \
 - `strict_format_rate`：是否严格只输出 `SELECT/WITH` 查询；
 - `sql_extraction_rate`：是否可以从回答中提取查询；
 - `executable_rate`：SQL 是否能在目标数据库成功执行；
-- `execution_accuracy`：生成 SQL 与标准 SQL 的执行结果是否一致；
+- `execution_accuracy`：生成 SQL 与标准 SQL 的执行结果值是否一致，列别名差异不影响结果；
 - `by_family`：各隐藏查询族的执行正确率。
 
 调参阶段使用 `dev`，最终模型确定后再在 `test` 上做一次最终评测，避免根据测试集反复调整训练配置。

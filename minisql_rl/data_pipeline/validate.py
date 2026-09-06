@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -37,14 +38,19 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def _result_hash(columns: list[str], rows: list[list[Any]]) -> str:
+def _result_hash(_columns: list[str], rows: list[list[Any]]) -> str:
     canonical = json.dumps(
-        {"columns": columns, "rows": rows},
+        {"rows": rows},
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _sample_key(record: dict[str, Any]) -> tuple[str, str]:
+    normalized_sql = re.sub(r"\s+", " ", record["sql"]).strip().rstrip(";").lower()
+    return record["question"].strip(), normalized_sql
 
 
 def validate_training_data(database_path: str | Path, data_directory: str | Path) -> dict[str, Any]:
@@ -56,12 +62,14 @@ def validate_training_data(database_path: str | Path, data_directory: str | Path
     splits: dict[str, list[dict[str, Any]]] = {}
     all_ids: set[str] = set()
     family_sets: dict[str, set[str]] = {}
+    sample_keys: dict[str, set[tuple[str, str]]] = {}
 
     for split in ("train", "dev", "test"):
         path = directory / f"canonical_{split}.jsonl"
         records = _read_jsonl(path)
         splits[split] = records
         family_sets[split] = set()
+        sample_keys[split] = set()
         for index, record in enumerate(records):
             missing = REQUIRED_CANONICAL_FIELDS - set(record)
             if missing:
@@ -72,6 +80,10 @@ def validate_training_data(database_path: str | Path, data_directory: str | Path
                 raise ValueError(f"duplicate record id: {record['id']}")
             all_ids.add(record["id"])
             family_sets[split].add(record["family_id"])
+            key = _sample_key(record)
+            if key in sample_keys[split]:
+                raise ValueError(f"duplicate question/SQL pair in {split}: {record['id']}")
+            sample_keys[split].add(key)
             result = sandbox.execute(record["sql"])
             actual_hash = _result_hash(result.columns, result.rows)
             if actual_hash != record["result_hash"]:
@@ -79,13 +91,23 @@ def validate_training_data(database_path: str | Path, data_directory: str | Path
             if record["expected"] != {"columns": result.columns, "rows": result.rows}:
                 raise ValueError(f"stored result mismatch for {record['id']}")
 
-    overlaps = {
+    family_overlaps = {
         "train_dev": sorted(family_sets["train"] & family_sets["dev"]),
         "train_test": sorted(family_sets["train"] & family_sets["test"]),
         "dev_test": sorted(family_sets["dev"] & family_sets["test"]),
     }
-    if any(overlaps.values()):
-        raise ValueError(f"query-family leakage detected: {overlaps}")
+    if family_sets["train"] != family_sets["dev"]:
+        raise ValueError("train and dev must cover the same trainable query families")
+    if family_overlaps["train_test"] or family_overlaps["dev_test"]:
+        raise ValueError(f"held-out test query-family leakage detected: {family_overlaps}")
+
+    sample_overlaps = {
+        "train_dev": sorted(sample_keys["train"] & sample_keys["dev"]),
+        "train_test": sorted(sample_keys["train"] & sample_keys["test"]),
+        "dev_test": sorted(sample_keys["dev"] & sample_keys["test"]),
+    }
+    if any(sample_overlaps.values()):
+        raise ValueError("duplicate question/SQL pairs detected across splits")
 
     sft_train = _read_jsonl(directory / "sql_sft_train.jsonl")
     sft_dev = _read_jsonl(directory / "sql_sft_dev.jsonl")
@@ -124,7 +146,8 @@ def validate_training_data(database_path: str | Path, data_directory: str | Path
         "canonical_records": sum(len(records) for records in splits.values()),
         "split_counts": {split: len(records) for split, records in splits.items()},
         "family_counts": {split: len(families) for split, families in family_sets.items()},
-        "family_overlaps": overlaps,
+        "family_overlaps": family_overlaps,
+        "sample_overlap_counts": {name: len(values) for name, values in sample_overlaps.items()},
         "sft_role_patterns": dict(sorted(role_patterns.items())),
         "sql_sft_records": len(sft_train) + len(sft_dev),
         "sql_rl_records": len(rl_records),
